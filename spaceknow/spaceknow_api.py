@@ -8,12 +8,16 @@ AUTH_URL = 'https://spaceknow.auth0.com/oauth/ro'
 BASE_URL = 'https://api.spaceknow.com'
 
 
-class FailedTask(Exception):
+class FailedTask(RuntimeError):
+    pass
+
+
+class RequestError(RuntimeError):
     pass
 
 
 class LongTaskRecord:
-    def __init__(self, url, next_try):
+    def __init__(self, url: str, next_try: datetime):
         self.url = url
         self.next_try = next_try
 
@@ -43,17 +47,22 @@ class SpaceKnowApi:
         response = requests.post(AUTH_URL, data=data)
         return response.json()['id_token']
 
-    def _post(self, url: str, data: Any) -> requests.Response:
+    def _post(self, url: str, data: Any) -> Dict:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self._auth_token}",
         }
-        return requests.post(f'{BASE_URL}{url}', headers=headers, data=json.dumps(data))
+        response = requests.post(f'{BASE_URL}{url}', headers=headers, data=json.dumps(data))
+        response_json = response.json()
+        if not response.ok:
+            raise RequestError(f'{response_json["error"]}: {response_json.get("errorMessage", None)}')
+        return response_json
+
+    def get(self, url: str) -> Any:
+        return requests.get(f'{BASE_URL}{url}').content
 
     def initiate(self, url: str, data: Any) -> str:
-        response_json = self._post(f'{url}/initiate', data=data).json()
-        print(f'{url}/initiate')
-        print(response_json)
+        response_json = self._post(f'{url}/initiate', data=data)
         next_try = datetime.now() + timedelta(seconds=int(response_json['nextTry']))
         pipeline_id = response_json['pipelineId']
         self._long_tasks[pipeline_id] = LongTaskRecord(url, next_try)
@@ -72,11 +81,11 @@ class SpaceKnowApi:
                 sleep((next_try - now).total_seconds())
 
             data = {'pipelineId': pipeline_id}
-            response_json = self._post('/tasking/get-status', data).json()
+            response_json = self._post('/tasking/get-status', data)
             status = response_json['status']
             if status == 'FAILED':
                 raise FailedTask
             if status != 'RESOLVED':
                 record.next_try = datetime.now() + timedelta(seconds=int(response_json['nextTry']))
 
-        return self._post(f'{url}/retrieve', data).json()
+        return self._post(f'{url}/retrieve', data)
