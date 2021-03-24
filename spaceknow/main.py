@@ -11,11 +11,12 @@ from spaceknow import spaceknow_api
 
 
 DATASETS = [
-    ('gbdx', ['idaho-pansharpened']),
+    ('gbdx', ['idaho-pansharpened', 'idaho-swir']),
+    ('iceye', ['Spotlight_SLC'])
 ]
 
 
-def draw_geometry(image: PIL.Image, draw: PIL.ImageDraw, geometry: Dict, bands):
+def draw_geometry(draw: PIL.ImageDraw, geometry: Dict, bands):
     if geometry['type'] != 'Polygon':
         raise NotImplementedError("Drawing non-polygon geometries is not implemented yet")
 
@@ -31,7 +32,7 @@ def draw_geometry(image: PIL.Image, draw: PIL.ImageDraw, geometry: Dict, bands):
     draw.polygon(image_coordinates, fill="#ff0000")
 
 
-def create_image(api: spaceknow_api.SpaceKnowApi, imagery_data, car_data, bands):
+def analyse(api: spaceknow_api.SpaceKnowApi, imagery_data, car_data, bands):
     if set(map(tuple, imagery_data['tiles'])) != set(map(tuple, car_data['tiles'])):
         raise RuntimeError("Non-matching set of tiles for imagery and car analysis")
 
@@ -41,10 +42,12 @@ def create_image(api: spaceknow_api.SpaceKnowApi, imagery_data, car_data, bands)
 
     min_x = min(x for _, x, _ in tiles)
     min_y = min(y for _, _, y in tiles)
-    max_x = min(x for _, x, _ in tiles)
-    max_y = min(y for _, _, y in tiles)
+    max_x = max(x for _, x, _ in tiles)
+    max_y = max(y for _, _, y in tiles)
 
     images = list()
+    width, height = None, None
+    total_cars = 0
     for z, x, y in tiles:
         image = PIL.Image.open(io.BytesIO(api.get(f'/kraken/grid/{imagery_data["mapId"]}/-/{z}/{x}/{y}/truecolor.png')))
         draw = PIL.ImageDraw.Draw(image)
@@ -53,11 +56,18 @@ def create_image(api: spaceknow_api.SpaceKnowApi, imagery_data, car_data, bands)
         if tile_car_data['type'] != 'FeatureCollection':
             raise RuntimeError(f"Unknown data type {tile_car_data['type']!r}")
 
+        total_cars += len(tile_car_data['features'])
         for single_car in tile_car_data['features']:
-            draw_geometry(image, draw, single_car['geometry'], bands)
+            draw_geometry(draw, single_car['geometry'], bands)
 
         images.append((image, x - min_x, y - min_y))
-        image.show()
+        width, height = image.width, image.height
+
+    final_image = PIL.Image.new('RGBA', (width * (max_x - min_x + 1), height * (max_y - min_y + 1)))
+    for image, x, y in images:
+        final_image.paste(image, (x * width, y * height))
+
+    return final_image, total_cars
 
 
 def process_dataset(api: spaceknow_api.SpaceKnowApi, geometry: Dict, provider: str, dataset: str) -> None:
@@ -75,7 +85,7 @@ def process_dataset(api: spaceknow_api.SpaceKnowApi, geometry: Dict, provider: s
     data = api.retrieve(api.initiate('/imagery/search', data=input_data))
     if data['cursor'] is not None:
         raise NotImplementedError("Cannot deal with paging yet")
-    data_results = data['results'][:1]
+    data_results = data['results']
     scene_ids = [x['sceneId'] for x in data_results]
     bands = [x['bands'] for x in data_results]
     imagery_pids, car_pids = (
@@ -86,7 +96,9 @@ def process_dataset(api: spaceknow_api.SpaceKnowApi, geometry: Dict, provider: s
     for i, (imagery_pid, car_pid, item_bands) in enumerate(zip(imagery_pids, car_pids, bands)):
         imagery_data = api.retrieve(imagery_pid)
         car_data = api.retrieve(car_pid)
-        create_image(api, imagery_data, car_data, item_bands)
+        image, cars = analyse(api, imagery_data, car_data, item_bands)
+        print(f"Number of cars in {provider}/{dataset}/{i} is {cars}")
+        image.show()
 
 
 def main() -> None:
